@@ -23,4 +23,10 @@ if ! grep -q 'workspaceModules' gomod2nix.toml; then
     exit 1
 fi
 
+# go-cmp is only imported by hello's tests: testDeps, never deps
+if ! grep -A3 'testDeps' gomod2nix.toml | grep -q 'github.com/google/go-cmp'; then
+    echo "ERROR: go-cmp is missing from workspaceModules.<hello>.testDeps"
+    exit 1
+fi
+
 echo "Workspace generation succeeded"

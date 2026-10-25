@@ -51,6 +51,7 @@ let
     mapAttrs
     mapAttrsToList
     optional
+    optionals
     optionalAttrs
     optionalString
     pathExists
@@ -447,6 +448,11 @@ let
       # tags/ldflags/CGO/go version (see mkWorkspaceCacheEnv).
       externalCacheEnv ? null,
       workspaceModule ? null,
+      # Vendor the workspace module's test-only dependencies too
+      # (`workspaceModules.<mod>.testDeps`), so `go test` and linters can run
+      # in the sandbox. Off by default: the production vendor tree, and the
+      # binary built from it, stay exactly as they were.
+      includeTestDeps ? false,
 
       ...
     }@attrs:
@@ -467,12 +473,13 @@ let
       wsModuleInfo =
         if workspaceModule != null then
           if
-            hasAttr "workspaceModules" modulesStruct
-            && hasAttr workspaceModule modulesStruct.workspaceModules
+            hasAttr "workspaceModules" modulesStruct && hasAttr workspaceModule modulesStruct.workspaceModules
           then
             modulesStruct.workspaceModules.${workspaceModule}
           else
-            throw "buildGoApplication: workspaceModule '${workspaceModule}' not found in gomod2nix.toml workspaceModules. Available: ${builtins.toString (builtins.attrNames (modulesStruct.workspaceModules or { }))}"
+            throw "buildGoApplication: workspaceModule '${workspaceModule}' not found in gomod2nix.toml workspaceModules. Available: ${
+              builtins.toString (builtins.attrNames (modulesStruct.workspaceModules or { }))
+            }"
         else
           null;
 
@@ -483,7 +490,7 @@ let
               map (name: {
                 inherit name;
                 value = true;
-              }) wsModuleInfo.deps
+              }) (wsModuleInfo.deps ++ optionals includeTestDeps (wsModuleInfo.testDeps or [ ]))
             );
           in
           filterAttrs (n: _: hasAttr n allowedSet) allMod
@@ -566,6 +573,7 @@ let
       // removeAttrs attrs [
         "workspaceModule"
         "externalCacheEnv"
+        "includeTestDeps"
       ]
       // {
         nativeBuildInputs = [
@@ -695,7 +703,9 @@ let
         allowGoReference
         ;
       CGO_ENABLED = if CGO_ENABLED != null then CGO_ENABLED else go.CGO_ENABLED;
-      goMod = { replace = { }; };
+      goMod = {
+        replace = { };
+      };
     };
 
 in

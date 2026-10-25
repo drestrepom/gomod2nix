@@ -20,6 +20,9 @@ type Package struct {
 type WorkspaceModuleInfo struct {
 	Dir  string   `toml:"dir"`
 	Deps []string `toml:"deps"`
+	// TestDeps lists the external modules only the module's tests import, on
+	// top of Deps. buildGoApplication adds them with includeTestDeps.
+	TestDeps []string `toml:"testDeps,omitempty"`
 }
 
 type Output struct {
@@ -32,7 +35,7 @@ type Output struct {
 
 	CachePackages []string `toml:"cachePackages,multiline,omitempty"`
 
-	Workspace        bool                                `toml:"workspace,omitempty"`
+	Workspace        bool                            `toml:"workspace,omitempty"`
 	WorkspaceModules map[string]*WorkspaceModuleInfo `toml:"workspaceModules,omitempty"`
 }
 

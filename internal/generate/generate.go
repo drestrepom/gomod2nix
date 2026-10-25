@@ -291,11 +291,62 @@ func commonWorkspace(workspace *WorkspaceInfo) ([]*goModDownload, map[string]str
 	return modDownloads, replace, nil
 }
 
-// computeWorkspaceDeps uses `go list -deps` to compute transitive production
-// dependencies per workspace module, excluding test-only imports.
-// Keys in the returned map are Go module paths (e.g. "example.com/hello"),
-// values contain the relative directory and the list of external dependency
-// module paths needed for a non-test build.
+// listModuleDeps returns the sorted external module paths that `./...` of the
+// module in moduleDir transitively imports. With withTests it also follows the
+// imports of the module's own _test.go files (`go list -test`), so the result
+// is what `go test ./...` needs in its vendor tree.
+func listModuleDeps(moduleDir string, workspaceModPaths map[string]bool, withTests bool) ([]string, error) {
+	args := []string{"list", "-deps"}
+	if withTests {
+		args = append(args, "-test")
+	}
+	args = append(args, "-f", "{{if and (not .Standard) .Module}}{{.Module.Path}}{{end}}", "./...")
+
+	cmd := exec.Command("go", args...)
+	cmd.Dir = moduleDir
+	stdout, err := cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("failed to run 'go %s' in %s: %s\n%s", strings.Join(args, " "), moduleDir, exiterr, exiterr.Stderr)
+		}
+		return nil, fmt.Errorf("failed to run 'go %s' in %s: %w", strings.Join(args, " "), moduleDir, err)
+	}
+
+	seen := make(map[string]bool)
+	var deps []string
+	for _, line := range strings.Split(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || workspaceModPaths[line] || seen[line] {
+			continue
+		}
+		seen[line] = true
+		deps = append(deps, line)
+	}
+	sort.Strings(deps)
+	return deps, nil
+}
+
+// testOnlyDeps returns the modules in withTests that are not in prod, sorted.
+func testOnlyDeps(prod, withTests []string) []string {
+	inProd := make(map[string]bool, len(prod))
+	for _, dep := range prod {
+		inProd[dep] = true
+	}
+	var testDeps []string
+	for _, dep := range withTests {
+		if !inProd[dep] {
+			testDeps = append(testDeps, dep)
+		}
+	}
+	return testDeps
+}
+
+// computeWorkspaceDeps uses `go list -deps` to compute transitive dependencies
+// per workspace module. Keys in the returned map are Go module paths (e.g.
+// "example.com/hello"); values carry the relative directory, the external
+// modules a non-test build needs (Deps) and the extra ones only its tests
+// import (TestDeps). Keeping them apart leaves the production vendor tree —
+// and therefore the binary's hash — untouched by test-only imports.
 func computeWorkspaceDeps(workspace *WorkspaceInfo) (map[string]*schema.WorkspaceModuleInfo, error) {
 	modulePathMap, err := workspace.ModulePathMap()
 	if err != nil {
@@ -307,47 +358,29 @@ func computeWorkspaceDeps(workspace *WorkspaceInfo) (map[string]*schema.Workspac
 		workspaceModPaths[modPath] = true
 	}
 
-	log.Info("Computing per-module production dependencies")
+	log.Info("Computing per-module dependencies")
 
 	result := make(map[string]*schema.WorkspaceModuleInfo)
 	for modPath, relDir := range modulePathMap {
 		moduleDir := filepath.Join(workspace.RootDir, relDir)
 
-		cmd := exec.Command(
-			"go", "list", "-deps",
-			"-f", "{{if and (not .Standard) .Module}}{{.Module.Path}}{{end}}",
-			"./...",
-		)
-		cmd.Dir = moduleDir
-		stdout, err := cmd.Output()
+		deps, err := listModuleDeps(moduleDir, workspaceModPaths, false)
 		if err != nil {
-			if exiterr, ok := err.(*exec.ExitError); ok {
-				return nil, fmt.Errorf("failed to run 'go list -deps' in %s: %s\n%s", relDir, exiterr, exiterr.Stderr)
-			}
-			return nil, fmt.Errorf("failed to run 'go list -deps' in %s: %w", relDir, err)
+			return nil, err
 		}
-
-		seen := make(map[string]bool)
-		var deps []string
-		for _, line := range strings.Split(string(stdout), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || workspaceModPaths[line] {
-				continue
-			}
-			if !seen[line] {
-				seen[line] = true
-				deps = append(deps, line)
-			}
+		withTests, err := listModuleDeps(moduleDir, workspaceModPaths, true)
+		if err != nil {
+			return nil, err
 		}
-		sort.Strings(deps)
 
 		result[modPath] = &schema.WorkspaceModuleInfo{
-			Dir:  relDir,
-			Deps: deps,
+			Dir:      relDir,
+			Deps:     deps,
+			TestDeps: testOnlyDeps(deps, withTests),
 		}
 	}
 
-	log.Info("Done computing per-module production dependencies")
+	log.Info("Done computing per-module dependencies")
 
 	return result, nil
 }

@@ -102,3 +102,27 @@ func TestDetectWorkspace_SkipsMissingGoMod(t *testing.T) {
 		t.Fatalf("expected 1 module dir (missing should be skipped), got %d", len(ws.ModuleDirs))
 	}
 }
+
+func TestTestOnlyDeps(t *testing.T) {
+	prod := []string{"golang.org/x/text", "github.com/jackc/pgx/v5"}
+	withTests := []string{"github.com/google/go-cmp", "github.com/jackc/pgx/v5", "github.com/stretchr/testify", "golang.org/x/text"}
+
+	got := testOnlyDeps(prod, withTests)
+	want := []string{"github.com/google/go-cmp", "github.com/stretchr/testify"}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("expected %v, got %v", want, got)
+		}
+	}
+}
+
+func TestTestOnlyDeps_NoTestImports(t *testing.T) {
+	deps := []string{"golang.org/x/text"}
+	if got := testOnlyDeps(deps, deps); got != nil {
+		t.Errorf("expected nil (omitted from the toml), got %v", got)
+	}
+}

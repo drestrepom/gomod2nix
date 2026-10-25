@@ -4,15 +4,26 @@
 }:
 
 let
-  drv = buildGoApplication {
+  args = {
     pname = "hello";
     version = "0.0.1";
     src = ./.;
     pwd = ./hello;
     modules = ./gomod2nix.toml;
     workspaceModule = "example.com/hello";
-    doCheck = false;
   };
+
+  drv = buildGoApplication (args // { doCheck = false; });
+
+  # go-cmp is imported only by hello's tests: it must land in testDeps, stay
+  # out of the production vendor tree, and be vendored with includeTestDeps.
+  tested = buildGoApplication (
+    args
+    // {
+      doCheck = true;
+      includeTestDeps = true;
+    }
+  );
 in
 runCommand "workspace-hello-assert" { } ''
   if ! test -f ${drv}/bin/hello; then
@@ -26,6 +37,18 @@ runCommand "workspace-hello-assert" { } ''
     echo "Expected '$expected' but got '$result'"
     exit 1
   fi
+
+  if test -e ${drv.vendorEnv}/github.com/google/go-cmp; then
+    echo "test-only dependency leaked into the production vendor tree"
+    exit 1
+  fi
+
+  if ! test -e ${tested.vendorEnv}/github.com/google/go-cmp; then
+    echo "includeTestDeps did not vendor the test-only dependency"
+    exit 1
+  fi
+
+  test -f ${tested}/bin/hello
 
   ln -s ${drv} $out
 ''

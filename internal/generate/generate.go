@@ -291,11 +291,44 @@ func commonWorkspace(workspace *WorkspaceInfo) ([]*goModDownload, map[string]str
 	return modDownloads, replace, nil
 }
 
+// depsPlatforms are the GOOS values whose import graphs feed Deps/TestDeps.
+// `go list` only follows the files that build on the current platform, so a
+// lock generated on macOS would miss modules that only Linux-tagged files
+// import (e.g. github.com/moby/sys/userns via moby/go-archive/archive_linux.go
+// in testcontainers) and the Linux build of the tests then fails with "cannot
+// find module providing package … import lookup disabled by -mod=vendor". The
+// union over the platforms the workspace is built on makes the lock
+// independent of where it was generated.
+var depsPlatforms = []string{"linux", "darwin"}
+
 // listModuleDeps returns the sorted external module paths that `./...` of the
-// module in moduleDir transitively imports. With withTests it also follows the
-// imports of the module's own _test.go files (`go list -test`), so the result
-// is what `go test ./...` needs in its vendor tree.
+// module in moduleDir transitively imports on any of depsPlatforms. With
+// withTests it also follows the imports of the module's own _test.go files
+// (`go list -test`), so the result is what `go test ./...` needs in its vendor
+// tree.
 func listModuleDeps(moduleDir string, workspaceModPaths map[string]bool, withTests bool) ([]string, error) {
+	seen := make(map[string]bool)
+	var deps []string
+	for _, goos := range depsPlatforms {
+		platformDeps, err := listModuleDepsForPlatform(moduleDir, goos, withTests)
+		if err != nil {
+			return nil, err
+		}
+		for _, dep := range platformDeps {
+			if workspaceModPaths[dep] || seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			deps = append(deps, dep)
+		}
+	}
+	sort.Strings(deps)
+	return deps, nil
+}
+
+// listModuleDepsForPlatform runs `go list -deps [-test]` for one GOOS and
+// returns the external module paths it reports, unsorted and with repeats.
+func listModuleDepsForPlatform(moduleDir, goos string, withTests bool) ([]string, error) {
 	args := []string{"list", "-deps"}
 	if withTests {
 		args = append(args, "-test")
@@ -304,25 +337,21 @@ func listModuleDeps(moduleDir string, workspaceModPaths map[string]bool, withTes
 
 	cmd := exec.Command("go", args...)
 	cmd.Dir = moduleDir
+	cmd.Env = append(os.Environ(), "GOOS="+goos)
 	stdout, err := cmd.Output()
 	if err != nil {
 		if exiterr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("failed to run 'go %s' in %s: %s\n%s", strings.Join(args, " "), moduleDir, exiterr, exiterr.Stderr)
+			return nil, fmt.Errorf("failed to run 'GOOS=%s go %s' in %s: %s\n%s", goos, strings.Join(args, " "), moduleDir, exiterr, exiterr.Stderr)
 		}
-		return nil, fmt.Errorf("failed to run 'go %s' in %s: %w", strings.Join(args, " "), moduleDir, err)
+		return nil, fmt.Errorf("failed to run 'GOOS=%s go %s' in %s: %w", goos, strings.Join(args, " "), moduleDir, err)
 	}
 
-	seen := make(map[string]bool)
 	var deps []string
 	for _, line := range strings.Split(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || workspaceModPaths[line] || seen[line] {
-			continue
+		if line = strings.TrimSpace(line); line != "" {
+			deps = append(deps, line)
 		}
-		seen[line] = true
-		deps = append(deps, line)
 	}
-	sort.Strings(deps)
 	return deps, nil
 }
 
